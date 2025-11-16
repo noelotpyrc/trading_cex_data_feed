@@ -21,19 +21,25 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+# Add project root to path if running as script
+if __name__ == "__main__":
+    project_root = Path(__file__).resolve().parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
 import pandas as pd
 
-from api import (
+from cex_data_feed.binance.api import (
     fetch_klines,
     klines_to_dataframe,
     compute_target_hour,
 )
-from db import (
+from cex_data_feed.binance.db import (
     ensure_table,
     read_last_n_rows_ending_before,
     append_row_if_absent,
 )
-from validation import validate_window as _vw
+from cex_data_feed.binance.validation import validate_window as _vw
 
 
 DEFAULT_SYMBOL = "BTCUSDT"

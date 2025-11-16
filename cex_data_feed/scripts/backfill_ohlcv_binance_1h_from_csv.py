@@ -23,14 +23,21 @@ Usage example:
 """
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Optional
+
+# Add project root to path if running as script
+if __name__ == "__main__":
+    project_root = Path(__file__).resolve().parent.parent.parent
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
 
 import duckdb  # type: ignore
 import numpy as np
 import pandas as pd
 
-from db import ensure_table, TABLE_NAME
+from cex_data_feed.binance.db import ensure_table, TABLE_NAME
 
 
 BINANCE_KLINE_HEADER = [
