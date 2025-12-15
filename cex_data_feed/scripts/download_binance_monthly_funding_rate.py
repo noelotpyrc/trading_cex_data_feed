@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 """
-Simple downloader for Binance monthly klines ZIPs (Spot or USDT-M Futures).
+Downloader for Binance USDT-M Futures monthly funding rate ZIPs.
 
-- Constructs monthly URLs by pattern without scraping
-- Verifies existence with a HEAD request (falls back to GET if needed)
-- Downloads files into a target directory
-- Skips files that already exist and match the remote Content-Length
+Files are under:
+  https://data.binance.vision/data/futures/um/monthly/fundingRate/{SYMBOL}/{SYMBOL}-fundingRate-YYYY-MM.zip
 
-Example file patterns:
-  Futures: https://data.binance.vision/data/futures/um/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2020-01.zip
-  Spot:    https://data.binance.vision/data/spot/monthly/klines/BTCUSDT/1h/BTCUSDT-1h-2020-01.zip
-
-Usage examples:
-  # Futures (default)
-  python -m cex_data_feed.scripts.download_binance_monthly_klines \
-    --out "/path/to/ohlvc" --start 2020-01 --symbol BTCUSDT --interval 1h
-
-  # Spot
-  python -m cex_data_feed.scripts.download_binance_monthly_klines \
-    --market spot --out "/path/to/spot_klines" --start 2020-01 --symbol BTCUSDT --interval 1h
-
-You can adjust symbol, interval, market, and date range via CLI flags.
+Example:
+  python scripts/download_binance_monthly_funding_rate.py \
+    --symbol BTCUSDT \
+    --start 2020-01 --end 2024-12 \
+    --out ./data/funding_rate
 """
 
 from __future__ import annotations
@@ -30,6 +19,8 @@ import os
 import sys
 import time
 import traceback
+import ssl
+import certifi
 from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -37,13 +28,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-BASE_URL_TEMPLATE = "https://data.binance.vision/data/{market_path}/monthly/klines"
-MARKET_PATHS = {
-    "futures": "futures/um",
-    "spot": "spot",
-}
-DEFAULT_OUTPUT_DIR = "/Volumes/Extreme SSD/trading_data/cex/ohlvc"
-
+BASE_MONTHLY_URL = "https://data.binance.vision/data/futures/um/monthly/fundingRate"
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
@@ -54,14 +39,12 @@ USER_AGENT = (
 
 def _http_request(url: str, *, method: str = "GET", timeout: float = 60.0):
     req = Request(url, method=method, headers={"User-Agent": USER_AGENT})
-    return urlopen(req, timeout=timeout)
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urlopen(req, timeout=timeout, context=context)
 
 
 def _month_iter(start_yyyymm: str, end_yyyymm: Optional[str] = None) -> List[str]:
-    """Generate inclusive list of months in YYYY-MM between start and end.
-
-    If end is None, uses current UTC month.
-    """
+    """Generate inclusive list of months in YYYY-MM between start and end."""
     start_dt = datetime.strptime(start_yyyymm, "%Y-%m").replace(day=1, tzinfo=timezone.utc)
     if end_yyyymm is None:
         now = datetime.now(timezone.utc)
@@ -82,34 +65,21 @@ def _month_iter(start_yyyymm: str, end_yyyymm: Optional[str] = None) -> List[str
     return months
 
 
-def build_monthly_url(symbol: str, interval: str, yyyymm: str, market: str = "futures") -> str:
-    market_path = MARKET_PATHS.get(market, MARKET_PATHS["futures"])
-    base_url = BASE_URL_TEMPLATE.format(market_path=market_path)
-    return (
-        f"{base_url}/{symbol}/{interval}/"
-        f"{symbol}-{interval}-{yyyymm}.zip"
-    )
+def build_monthly_url(symbol: str, yyyymm: str) -> str:
+    return f"{BASE_MONTHLY_URL}/{symbol}/{symbol}-fundingRate-{yyyymm}.zip"
 
 
 def url_exists(url: str, timeout: float = 30.0) -> Tuple[bool, Optional[int]]:
-    """Check if URL exists using HEAD, returning (exists, content_length).
-
-    Falls back to a tiny GET if HEAD fails (some servers may not support HEAD).
-    """
     try:
         with _http_request(url, method="HEAD", timeout=timeout) as resp:
             length = resp.headers.get("Content-Length")
             size = int(length) if length is not None else None
             return True, size
     except HTTPError as e:
-        # 404 -> not found; others may still be retried with GET
         if getattr(e, "code", None) == 404:
             return False, None
-        # Try GET fallback
     except URLError:
         pass
-
-    # Fallback: small GET attempt
     try:
         with _http_request(url, method="GET", timeout=timeout) as resp:
             length = resp.headers.get("Content-Length")
@@ -126,7 +96,6 @@ def _get_remote_content_length(url: str, timeout: float = 60.0) -> Optional[int]
             if length is not None:
                 return int(length)
     except HTTPError as e:
-        # Some servers may not support HEAD; ignore
         print(f"[INFO] HEAD failed for {url}: {e}. Will GET instead.")
     except URLError as e:
         print(f"[WARN] HEAD connection error for {url}: {e}")
@@ -149,16 +118,12 @@ def _stream_download(url: str, dest_path: str, timeout: float = 120.0) -> None:
                         break
                     f.write(chunk)
                     bytes_written += len(chunk)
-                    # Lightweight progress indicator
                     if bytes_written % (1024 * 1024 * 50) == 0:
                         elapsed = time.time() - start_time
                         mb = bytes_written / (1024 * 1024)
-                        print(
-                            f"  downloaded ~{mb:.1f} MiB in {elapsed:.1f}s"
-                        )
+                        print(f"  downloaded ~{mb:.1f} MiB in {elapsed:.1f}s")
         os.replace(tmp_path, dest_path)
     finally:
-        # Clean up partial files on error/interruption
         try:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
@@ -167,12 +132,6 @@ def _stream_download(url: str, dest_path: str, timeout: float = 120.0) -> None:
 
 
 def download_if_needed(url: str, output_dir: str, timeout: float = 120.0) -> Tuple[str, str]:
-    """Download URL into output_dir if missing or size mismatch.
-
-    Returns a tuple of (status, path):
-      - status in {"skipped", "downloaded", "failed"}
-      - path is the local file path
-    """
     file_name = os.path.basename(urlparse(url).path)
     if not file_name:
         return ("failed", "")
@@ -187,18 +146,13 @@ def download_if_needed(url: str, output_dir: str, timeout: float = 120.0) -> Tup
         if remote_size is not None and local_size == remote_size:
             return ("skipped", dest_path)
         else:
-            print(
-                f"[INFO] Re-downloading due to size mismatch or unknown size: {file_name}"
-            )
+            print(f"[INFO] Re-downloading due to size mismatch or unknown size: {file_name}")
     try:
         _stream_download(url, dest_path, timeout=timeout)
-        # Verify size when possible
         if remote_size is not None:
             try:
                 if os.path.getsize(dest_path) != remote_size:
-                    print(
-                        f"[WARN] Size mismatch after download for {file_name}"
-                    )
+                    print(f"[WARN] Size mismatch after download for {file_name}")
             except OSError:
                 pass
         return ("downloaded", dest_path)
@@ -212,37 +166,13 @@ def download_if_needed(url: str, output_dir: str, timeout: float = 120.0) -> Tup
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description=("Download Binance monthly kline ZIPs (Spot or Futures).")
-    )
-    parser.add_argument(
-        "--market",
-        choices=["spot", "futures"],
-        default="futures",
-        help="Market type: 'spot' or 'futures' (default: futures)",
-    )
+    parser = argparse.ArgumentParser(description=("Download Binance USDT-M monthly funding rate ZIPs."))
     parser.add_argument("--symbol", default="BTCUSDT", help="Symbol, e.g., BTCUSDT")
-    parser.add_argument("--interval", default="1m", help="Interval, e.g., 1m")
     parser.add_argument("--start", default="2020-01", help="Start month YYYY-MM (inclusive)")
     parser.add_argument("--end", default=None, help="End month YYYY-MM (inclusive); default: current month")
-    parser.add_argument(
-        "--out",
-        default=DEFAULT_OUTPUT_DIR,
-        help=(
-            "Output directory for downloaded ZIPs. Will be created if missing."
-        ),
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Only list files to be downloaded; do not download.",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=float,
-        default=120.0,
-        help="Network timeout per request in seconds (default: 120).",
-    )
+    parser.add_argument("--out", required=True, help="Output directory for downloaded ZIPs")
+    parser.add_argument("--dry-run", action="store_true", help="Only list files to be downloaded; do not download.")
+    parser.add_argument("--timeout", type=float, default=120.0, help="Network timeout per request in seconds (default: 120).")
     return parser.parse_args(argv)
 
 
@@ -254,14 +184,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[ERROR] Empty month range. Check --start/--end.")
         return 2
 
-    # Build URLs and filter to those that exist
-    candidates = [build_monthly_url(args.symbol, args.interval, m, args.market) for m in months]
+    candidates = [build_monthly_url(args.symbol, m) for m in months]
     existing: List[Tuple[str, Optional[int]]] = []
-    print("[INFO] Probing monthly files...")
-    for url in candidates:
+    print(f"[INFO] Probing {len(candidates)} monthly files...")
+    for i, url in enumerate(candidates, start=1):
+        if i % 12 == 0: # Log roughly every year
+            print(f"  probing {i}/{len(candidates)}...", end="\r")
         ok, size = url_exists(url, timeout=args.timeout)
         if ok:
             existing.append((url, size))
+    print(f"  probing {len(candidates)}/{len(candidates)}... Done.")
 
     if not existing:
         print("[ERROR] No files found for the specified range.")
@@ -292,14 +224,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         else:
             num_failed += 1
 
-    print(
-        "[INFO] Done. "
-        f"downloaded={num_downloaded}, skipped={num_skipped}, failed={num_failed}"
-    )
+    print(f"[INFO] Done. downloaded={num_downloaded}, skipped={num_skipped}, failed={num_failed}")
     return 0 if num_failed == 0 else 1
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
-

@@ -1,33 +1,24 @@
 #!/usr/bin/env python3
 """
-Downloader for Binance daily kline ZIPs (Spot or USDT-M Futures).
+Downloader for Binance USDT-M Futures daily Premium Index Kline ZIPs.
 
-Use this to backfill partial months (e.g., current month) that aren't yet
-available in the monthly dataset. Files are under:
-  Futures: https://data.binance.vision/data/futures/um/daily/klines/{SYMBOL}/{INTERVAL}/
-  Spot:    https://data.binance.vision/data/spot/daily/klines/{SYMBOL}/{INTERVAL}/
+Files are under:
+  https://data.binance.vision/data/futures/um/daily/premiumIndexKlines/{SYMBOL}/{INTERVAL}/{SYMBOL}-{INTERVAL}-YYYY-MM-DD.zip
 
 Example:
-  # Futures (default)
-  python -m cex_data_feed.scripts.download_binance_daily_klines \
+  python scripts/download_binance_daily_premium_index.py \
     --symbol BTCUSDT --interval 1h \
-    --start-date 2025-09-01 --end-date 2025-09-14 \
-    --out "/path/to/daily_1h"
-
-  # Spot
-  python -m cex_data_feed.scripts.download_binance_daily_klines \
-    --market spot --symbol BTCUSDT --interval 1h \
-    --start-date 2025-09-01 --end-date 2025-09-14 \
-    --out "/path/to/spot_daily_1h"
-
-Then merge with merge_binance_klines.py by pointing --in-dir to the folder
-containing the daily ZIPs.
+    --start-date 2025-01-01 --end-date 2025-01-31 \
+    --out ./data/premium_index
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import time
+import ssl
+import certifi
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Tuple
 from urllib.error import HTTPError, URLError
@@ -35,11 +26,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 
-BASE_URL_TEMPLATE = "https://data.binance.vision/data/{market_path}/daily/klines"
-MARKET_PATHS = {
-    "futures": "futures/um",
-    "spot": "spot",
-}
+BASE_DAILY_URL = "https://data.binance.vision/data/futures/um/daily/premiumIndexKlines"
 
 USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) "
@@ -50,7 +37,8 @@ USER_AGENT = (
 
 def _http_request(url: str, *, method: str = "GET", timeout: float = 60.0):
     req = Request(url, method=method, headers={"User-Agent": USER_AGENT})
-    return urlopen(req, timeout=timeout)
+    context = ssl.create_default_context(cafile=certifi.where())
+    return urlopen(req, timeout=timeout, context=context)
 
 
 def _date_iter(start_date: str, end_date: Optional[str] = None) -> List[str]:
@@ -69,10 +57,8 @@ def _date_iter(start_date: str, end_date: Optional[str] = None) -> List[str]:
     return out
 
 
-def build_daily_url(symbol: str, interval: str, yyyymmdd: str, market: str = "futures") -> str:
-    market_path = MARKET_PATHS.get(market, MARKET_PATHS["futures"])
-    base_url = BASE_URL_TEMPLATE.format(market_path=market_path)
-    return f"{base_url}/{symbol}/{interval}/{symbol}-{interval}-{yyyymmdd}.zip"
+def build_daily_url(symbol: str, interval: str, yyyymmdd: str) -> str:
+    return f"{BASE_DAILY_URL}/{symbol}/{interval}/{symbol}-{interval}-{yyyymmdd}.zip"
 
 
 def url_exists(url: str, timeout: float = 30.0) -> Tuple[bool, Optional[int]]:
@@ -109,6 +95,8 @@ def _get_remote_content_length(url: str, timeout: float = 60.0) -> Optional[int]
 def _stream_download(url: str, dest_path: str, timeout: float = 120.0) -> None:
     tmp_path = dest_path + ".part"
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    bytes_written = 0
+    start_time = time.time()
     with _http_request(url, method="GET", timeout=timeout) as resp:
         with open(tmp_path, "wb") as f:
             while True:
@@ -116,6 +104,11 @@ def _stream_download(url: str, dest_path: str, timeout: float = 120.0) -> None:
                 if not chunk:
                     break
                 f.write(chunk)
+                bytes_written += len(chunk)
+                if bytes_written % (1024 * 1024 * 10) == 0:
+                    elapsed = time.time() - start_time
+                    mb = bytes_written / (1024 * 1024)
+                    print(f"  downloaded ~{mb:.1f} MiB in {elapsed:.1f}s")
     os.replace(tmp_path, dest_path)
     try:
         if os.path.exists(tmp_path):
@@ -148,13 +141,7 @@ def download_if_needed(url: str, output_dir: str, timeout: float = 120.0) -> Tup
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=("Download Binance daily kline ZIPs (Spot or Futures)."))
-    parser.add_argument(
-        "--market",
-        choices=["spot", "futures"],
-        default="futures",
-        help="Market type: 'spot' or 'futures' (default: futures)",
-    )
+    parser = argparse.ArgumentParser(description=("Download Binance USDT-M daily Premium Index Kline ZIPs."))
     parser.add_argument("--symbol", default="BTCUSDT", help="Symbol, e.g., BTCUSDT")
     parser.add_argument("--interval", default="1h", help="Interval, e.g., 1h")
     parser.add_argument("--start-date", required=True, help="Start date YYYY-MM-DD (inclusive)")
@@ -172,12 +159,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[ERROR] Empty date range. Check --start-date/--end-date.")
         return 2
 
-    urls = [build_daily_url(args.symbol, args.interval, d, args.market) for d in days]
+    urls = [build_daily_url(args.symbol, args.interval, d) for d in days]
     available = []
-    for u in urls:
+    print(f"[INFO] Checking availability for {len(urls)} files...")
+    for i, u in enumerate(urls, start=1):
+        if i % 10 == 0:
+            print(f"  checking {i}/{len(urls)}...", end="\r")
         ok, size = url_exists(u, timeout=args.timeout)
         if ok:
             available.append((u, size))
+    print(f"  checking {len(urls)}/{len(urls)}... Done.")
+
     if not available:
         print("[ERROR] No daily files found for the specified range.")
         return 2
@@ -207,4 +199,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
