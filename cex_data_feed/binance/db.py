@@ -99,3 +99,283 @@ def coverage_stats(db_path: Path) -> Optional[tuple[pd.Timestamp, pd.Timestamp, 
     finally:
         con.close()
 
+
+# -----------------------------------------------------------------------------
+# Open Interest Table (Historical Statistics)
+# -----------------------------------------------------------------------------
+
+TABLE_OPEN_INTEREST = "open_interest_btcusdt_1h"
+
+
+def ensure_table_open_interest(db_path: Path) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_OPEN_INTEREST} (
+              timestamp TIMESTAMP,
+              sum_open_interest DOUBLE,
+              sum_open_interest_value DOUBLE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_OPEN_INTEREST}_ts ON {TABLE_OPEN_INTEREST}(timestamp);")
+    finally:
+        con.close()
+
+
+def append_open_interest_if_absent(db_path: Path, row: pd.Series) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute(
+            f"""
+            INSERT INTO {TABLE_OPEN_INTEREST} (timestamp, sum_open_interest, sum_open_interest_value)
+            SELECT ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {TABLE_OPEN_INTEREST} WHERE timestamp = ?
+            );
+            """,
+            [
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                float(row["sum_open_interest"]),
+                float(row["sum_open_interest_value"]),
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+            ],
+        )
+    finally:
+        con.close()
+
+
+def read_last_n_open_interest(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        q = f"""
+            SELECT timestamp, sum_open_interest, sum_open_interest_value
+            FROM {TABLE_OPEN_INTEREST}
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        df = con.execute(q, [end_exclusive.to_pydatetime(), n]).fetch_df()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    finally:
+        con.close()
+
+
+# -----------------------------------------------------------------------------
+# Long/Short Ratio Table
+# -----------------------------------------------------------------------------
+
+TABLE_LONG_SHORT_RATIO = "long_short_ratio_btcusdt_1h"
+
+
+def ensure_table_long_short_ratio(db_path: Path) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_LONG_SHORT_RATIO} (
+              timestamp TIMESTAMP,
+              long_short_ratio DOUBLE,
+              long_account DOUBLE,
+              short_account DOUBLE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_LONG_SHORT_RATIO}_ts ON {TABLE_LONG_SHORT_RATIO}(timestamp);")
+    finally:
+        con.close()
+
+
+def append_long_short_ratio_if_absent(db_path: Path, row: pd.Series) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute(
+            f"""
+            INSERT INTO {TABLE_LONG_SHORT_RATIO} (timestamp, long_short_ratio, long_account, short_account)
+            SELECT ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {TABLE_LONG_SHORT_RATIO} WHERE timestamp = ?
+            );
+            """,
+            [
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                float(row["long_short_ratio"]),
+                float(row["long_account"]),
+                float(row["short_account"]),
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+            ],
+        )
+    finally:
+        con.close()
+
+
+def read_last_n_long_short_ratio(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        q = f"""
+            SELECT timestamp, long_short_ratio, long_account, short_account
+            FROM {TABLE_LONG_SHORT_RATIO}
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        df = con.execute(q, [end_exclusive.to_pydatetime(), n]).fetch_df()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    finally:
+        con.close()
+
+
+# -----------------------------------------------------------------------------
+# Premium Index Klines Table
+# -----------------------------------------------------------------------------
+
+TABLE_PREMIUM_INDEX = "premium_index_btcusdt_1h"
+
+
+def ensure_table_premium_index(db_path: Path) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_PREMIUM_INDEX} (
+              timestamp TIMESTAMP,
+              open DOUBLE,
+              high DOUBLE,
+              low DOUBLE,
+              close DOUBLE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_PREMIUM_INDEX}_ts ON {TABLE_PREMIUM_INDEX}(timestamp);")
+    finally:
+        con.close()
+
+
+def append_premium_index_if_absent(db_path: Path, row: pd.Series) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute(
+            f"""
+            INSERT INTO {TABLE_PREMIUM_INDEX} (timestamp, open, high, low, close)
+            SELECT ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {TABLE_PREMIUM_INDEX} WHERE timestamp = ?
+            );
+            """,
+            [
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+            ],
+        )
+    finally:
+        con.close()
+
+
+def read_last_n_premium_index(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        q = f"""
+            SELECT timestamp, open, high, low, close
+            FROM {TABLE_PREMIUM_INDEX}
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        df = con.execute(q, [end_exclusive.to_pydatetime(), n]).fetch_df()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    finally:
+        con.close()
+
+
+# -----------------------------------------------------------------------------
+# Spot Klines Table
+# -----------------------------------------------------------------------------
+
+TABLE_SPOT_KLINES = "spot_klines_btcusdt_1h"
+
+
+def ensure_table_spot_klines(db_path: Path) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_SPOT_KLINES} (
+              timestamp TIMESTAMP,
+              open DOUBLE,
+              high DOUBLE,
+              low DOUBLE,
+              close DOUBLE,
+              volume DOUBLE,
+              num_trades INTEGER,
+              taker_buy_base_volume DOUBLE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_SPOT_KLINES}_ts ON {TABLE_SPOT_KLINES}(timestamp);")
+    finally:
+        con.close()
+
+
+def append_spot_kline_if_absent(db_path: Path, row: pd.Series) -> None:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute(
+            f"""
+            INSERT INTO {TABLE_SPOT_KLINES} (timestamp, open, high, low, close, volume, num_trades, taker_buy_base_volume)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {TABLE_SPOT_KLINES} WHERE timestamp = ?
+            );
+            """,
+            [
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                float(row["volume"]),
+                int(row["num_trades"]),
+                float(row["taker_buy_base_volume"]),
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+            ],
+        )
+    finally:
+        con.close()
+
+
+def read_last_n_spot_klines(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        q = f"""
+            SELECT timestamp, open, high, low, close, volume, num_trades, taker_buy_base_volume
+            FROM {TABLE_SPOT_KLINES}
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        df = con.execute(q, [end_exclusive.to_pydatetime(), n]).fetch_df()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    finally:
+        con.close()
+
