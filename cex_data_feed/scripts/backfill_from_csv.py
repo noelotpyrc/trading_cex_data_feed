@@ -36,6 +36,7 @@ DEFAULT_DATA_DIR = Path(__file__).parent.parent.parent / "data"
 # CSV file names (updated naming with 2025-12)
 CSV_FILES = {
     "metrics": "BTCUSDT-metrics-2021-12-2025-12.csv",
+    "metrics_clean": "BTCUSDT-metrics-1h-clean.csv",  # Cleaned hourly metrics with gap-filling
     "premium_index": "BTCUSDT-1h-premium-index-2020-01-2025-12.csv",
     "spot": "BTCUSDT-1h-spot-2020-01-2025-12.csv",
 }
@@ -56,30 +57,27 @@ def _connect(db_path: Path):
 
 
 def backfill_open_interest(data_dir: Path, db_path: Path, dry_run: bool = False) -> int:
-    """Backfill Open Interest from metrics CSV using bulk insert."""
-    csv_path = data_dir / CSV_FILES["metrics"]
+    """Backfill Open Interest from cleaned hourly metrics CSV."""
+    csv_path = data_dir / CSV_FILES["metrics_clean"]
     if not csv_path.exists():
-        print(f"[ERROR] CSV not found: {csv_path}")
+        print(f"[ERROR] Clean CSV not found: {csv_path}")
+        print(f"[HINT] Run: python -m cex_data_feed.scripts.clean_metrics_1h")
         return 1
     
     print(f"\n=== Backfilling Open Interest ===")
     print(f"Source: {csv_path}")
     print(f"Target: {db_path}")
     
-    # Read and prepare data
+    # Read cleaned hourly data (already has snapshot_time and timestamp)
     df = pd.read_csv(csv_path)
-    df["ts"] = pd.to_datetime(df["create_time"])
-    df = df[df["ts"].dt.minute == 0].copy()  # Hourly only
+    df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
     
-    # Transform timestamps
-    df["snapshot_time"] = df["ts"]
-    df["timestamp"] = df["snapshot_time"] - pd.Timedelta(hours=1)
-    
-    # Select and rename columns for DB
+    # Select columns for DB (excluding NaN rows)
     insert_df = df[["timestamp", "snapshot_time", "sum_open_interest", "sum_open_interest_value"]].copy()
-    insert_df.columns = ["timestamp", "snapshot_time", "sum_open_interest", "sum_open_interest_value"]
+    insert_df = insert_df.dropna(subset=["sum_open_interest"])  # Skip NaN rows
     
-    print(f"Rows to insert: {len(insert_df)}")
+    print(f"Rows to insert: {len(insert_df)} (skipped {len(df) - len(insert_df)} NaN rows)")
     
     if dry_run:
         print("[DRY-RUN] Would insert:")
@@ -128,26 +126,23 @@ def backfill_open_interest(data_dir: Path, db_path: Path, dry_run: bool = False)
 
 
 def backfill_long_short_ratio(data_dir: Path, db_path: Path, dry_run: bool = False) -> int:
-    """Backfill Long/Short Ratio from metrics CSV using bulk insert."""
-    csv_path = data_dir / CSV_FILES["metrics"]
+    """Backfill Long/Short Ratio from cleaned hourly metrics CSV."""
+    csv_path = data_dir / CSV_FILES["metrics_clean"]
     if not csv_path.exists():
-        print(f"[ERROR] CSV not found: {csv_path}")
+        print(f"[ERROR] Clean CSV not found: {csv_path}")
+        print(f"[HINT] Run: python -m cex_data_feed.scripts.clean_metrics_1h")
         return 1
     
     print(f"\n=== Backfilling Long/Short Ratio ===")
     print(f"Source: {csv_path}")
     print(f"Target: {db_path}")
     
-    # Read and prepare data
+    # Read cleaned hourly data
     df = pd.read_csv(csv_path)
-    df["ts"] = pd.to_datetime(df["create_time"])
-    df = df[df["ts"].dt.minute == 0].copy()
+    df["snapshot_time"] = pd.to_datetime(df["snapshot_time"])
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
     
-    # Transform timestamps
-    df["snapshot_time"] = df["ts"]
-    df["timestamp"] = df["snapshot_time"] - pd.Timedelta(hours=1)
-    
-    # Prepare columns, filling NaN with 0
+    # Prepare columns, filling NaN with 0 for ratio columns
     insert_df = pd.DataFrame({
         "timestamp": df["timestamp"],
         "snapshot_time": df["snapshot_time"],
@@ -156,7 +151,10 @@ def backfill_long_short_ratio(data_dir: Path, db_path: Path, dry_run: bool = Fal
         "short_account": df["sum_toptrader_long_short_ratio"].fillna(0),
     })
     
-    print(f"Rows to insert: {len(insert_df)}")
+    # Skip rows where actual data is missing (from clean CSV NaN entries)
+    insert_df = insert_df[df["sum_open_interest"].notna()]
+    
+    print(f"Rows to insert: {len(insert_df)} (skipped {len(df) - len(insert_df)} NaN rows)")
     
     if dry_run:
         print("[DRY-RUN] Would insert:")
