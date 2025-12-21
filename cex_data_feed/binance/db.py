@@ -22,12 +22,14 @@ def _connect(db_path: Path):
 
 
 def ensure_table(db_path: Path) -> None:
+    """Create OHLCV table if not exists. Also runs migration to add snapshot_time if needed."""
     con = _connect(db_path)
     try:
         con.execute(
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
               timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
               open DOUBLE,
               high DOUBLE,
               low DOUBLE,
@@ -39,6 +41,14 @@ def ensure_table(db_path: Path) -> None:
         )
         # Lightweight uniqueness guard via index; DuckDB does not enforce PK by default
         con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_NAME}_ts ON {TABLE_NAME}(timestamp);")
+        
+        # Migration: Add snapshot_time column if it doesn't exist (for existing tables)
+        try:
+            con.execute(f"ALTER TABLE {TABLE_NAME} ADD COLUMN snapshot_time TIMESTAMP;")
+            # Backfill: snapshot_time = timestamp + 1 hour for existing rows
+            con.execute(f"UPDATE {TABLE_NAME} SET snapshot_time = timestamp + INTERVAL '1 hour' WHERE snapshot_time IS NULL;")
+        except duckdb.CatalogException:
+            pass  # Column already exists
     finally:
         con.close()
 
@@ -48,7 +58,7 @@ def read_last_n_rows_ending_before(db_path: Path, n: int, end_exclusive: pd.Time
     try:
         con.execute("SET TimeZone='UTC';")
         q = f"""
-            SELECT timestamp, open, high, low, close, volume
+            SELECT timestamp, snapshot_time, open, high, low, close, volume
             FROM {TABLE_NAME}
             WHERE timestamp < ?
             ORDER BY timestamp DESC
@@ -68,14 +78,15 @@ def append_row_if_absent(db_path: Path, row: pd.Series) -> None:
         con.execute("SET TimeZone='UTC';")
         con.execute(
             f"""
-            INSERT INTO {TABLE_NAME} (timestamp, open, high, low, close, volume)
-            SELECT ?, ?, ?, ?, ?, ?
+            INSERT INTO {TABLE_NAME} (timestamp, snapshot_time, open, high, low, close, volume)
+            SELECT ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM {TABLE_NAME} WHERE timestamp = ?
             );
             """,
             [
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
                 float(row["open"]),
                 float(row["high"]),
                 float(row["low"]),
@@ -114,6 +125,7 @@ def ensure_table_open_interest(db_path: Path) -> None:
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_OPEN_INTEREST} (
               timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
               sum_open_interest DOUBLE,
               sum_open_interest_value DOUBLE,
               created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -131,14 +143,15 @@ def append_open_interest_if_absent(db_path: Path, row: pd.Series) -> None:
         con.execute("SET TimeZone='UTC';")
         con.execute(
             f"""
-            INSERT INTO {TABLE_OPEN_INTEREST} (timestamp, sum_open_interest, sum_open_interest_value)
-            SELECT ?, ?, ?
+            INSERT INTO {TABLE_OPEN_INTEREST} (timestamp, snapshot_time, sum_open_interest, sum_open_interest_value)
+            SELECT ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM {TABLE_OPEN_INTEREST} WHERE timestamp = ?
             );
             """,
             [
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
                 float(row["sum_open_interest"]),
                 float(row["sum_open_interest_value"]),
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
@@ -153,7 +166,7 @@ def read_last_n_open_interest(db_path: Path, n: int, end_exclusive: pd.Timestamp
     try:
         con.execute("SET TimeZone='UTC';")
         q = f"""
-            SELECT timestamp, sum_open_interest, sum_open_interest_value
+            SELECT timestamp, snapshot_time, sum_open_interest, sum_open_interest_value
             FROM {TABLE_OPEN_INTEREST}
             WHERE timestamp < ?
             ORDER BY timestamp DESC
@@ -180,6 +193,7 @@ def ensure_table_long_short_ratio(db_path: Path) -> None:
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_LONG_SHORT_RATIO} (
               timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
               long_short_ratio DOUBLE,
               long_account DOUBLE,
               short_account DOUBLE,
@@ -198,14 +212,15 @@ def append_long_short_ratio_if_absent(db_path: Path, row: pd.Series) -> None:
         con.execute("SET TimeZone='UTC';")
         con.execute(
             f"""
-            INSERT INTO {TABLE_LONG_SHORT_RATIO} (timestamp, long_short_ratio, long_account, short_account)
-            SELECT ?, ?, ?, ?
+            INSERT INTO {TABLE_LONG_SHORT_RATIO} (timestamp, snapshot_time, long_short_ratio, long_account, short_account)
+            SELECT ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM {TABLE_LONG_SHORT_RATIO} WHERE timestamp = ?
             );
             """,
             [
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
                 float(row["long_short_ratio"]),
                 float(row["long_account"]),
                 float(row["short_account"]),
@@ -221,7 +236,7 @@ def read_last_n_long_short_ratio(db_path: Path, n: int, end_exclusive: pd.Timest
     try:
         con.execute("SET TimeZone='UTC';")
         q = f"""
-            SELECT timestamp, long_short_ratio, long_account, short_account
+            SELECT timestamp, snapshot_time, long_short_ratio, long_account, short_account
             FROM {TABLE_LONG_SHORT_RATIO}
             WHERE timestamp < ?
             ORDER BY timestamp DESC
@@ -248,6 +263,7 @@ def ensure_table_premium_index(db_path: Path) -> None:
             f"""
             CREATE TABLE IF NOT EXISTS {TABLE_PREMIUM_INDEX} (
               timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
               open DOUBLE,
               high DOUBLE,
               low DOUBLE,
@@ -267,14 +283,15 @@ def append_premium_index_if_absent(db_path: Path, row: pd.Series) -> None:
         con.execute("SET TimeZone='UTC';")
         con.execute(
             f"""
-            INSERT INTO {TABLE_PREMIUM_INDEX} (timestamp, open, high, low, close)
-            SELECT ?, ?, ?, ?, ?
+            INSERT INTO {TABLE_PREMIUM_INDEX} (timestamp, snapshot_time, open, high, low, close)
+            SELECT ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
                 SELECT 1 FROM {TABLE_PREMIUM_INDEX} WHERE timestamp = ?
             );
             """,
             [
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
                 float(row["open"]),
                 float(row["high"]),
                 float(row["low"]),
@@ -291,7 +308,7 @@ def read_last_n_premium_index(db_path: Path, n: int, end_exclusive: pd.Timestamp
     try:
         con.execute("SET TimeZone='UTC';")
         q = f"""
-            SELECT timestamp, open, high, low, close
+            SELECT timestamp, snapshot_time, open, high, low, close
             FROM {TABLE_PREMIUM_INDEX}
             WHERE timestamp < ?
             ORDER BY timestamp DESC
@@ -308,16 +325,18 @@ def read_last_n_premium_index(db_path: Path, n: int, end_exclusive: pd.Timestamp
 # Spot Klines Table
 # -----------------------------------------------------------------------------
 
-TABLE_SPOT_KLINES = "spot_klines_btcusdt_1h"
+# NOTE: Spot table uses same name as perp OHLCV for consistency
+TABLE_SPOT_OHLCV = "ohlcv_btcusdt_1h"
 
 
-def ensure_table_spot_klines(db_path: Path) -> None:
+def ensure_table_spot_ohlcv(db_path: Path) -> None:
     con = _connect(db_path)
     try:
         con.execute(
             f"""
-            CREATE TABLE IF NOT EXISTS {TABLE_SPOT_KLINES} (
+            CREATE TABLE IF NOT EXISTS {TABLE_SPOT_OHLCV} (
               timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
               open DOUBLE,
               high DOUBLE,
               low DOUBLE,
@@ -329,25 +348,26 @@ def ensure_table_spot_klines(db_path: Path) -> None:
             );
             """
         )
-        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_SPOT_KLINES}_ts ON {TABLE_SPOT_KLINES}(timestamp);")
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_SPOT_OHLCV}_ts ON {TABLE_SPOT_OHLCV}(timestamp);")
     finally:
         con.close()
 
 
-def append_spot_kline_if_absent(db_path: Path, row: pd.Series) -> None:
+def append_spot_ohlcv_if_absent(db_path: Path, row: pd.Series) -> None:
     con = _connect(db_path)
     try:
         con.execute("SET TimeZone='UTC';")
         con.execute(
             f"""
-            INSERT INTO {TABLE_SPOT_KLINES} (timestamp, open, high, low, close, volume, num_trades, taker_buy_base_volume)
-            SELECT ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT INTO {TABLE_SPOT_OHLCV} (timestamp, snapshot_time, open, high, low, close, volume, num_trades, taker_buy_base_volume)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
             WHERE NOT EXISTS (
-                SELECT 1 FROM {TABLE_SPOT_KLINES} WHERE timestamp = ?
+                SELECT 1 FROM {TABLE_SPOT_OHLCV} WHERE timestamp = ?
             );
             """,
             [
                 pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
                 float(row["open"]),
                 float(row["high"]),
                 float(row["low"]),
@@ -362,13 +382,13 @@ def append_spot_kline_if_absent(db_path: Path, row: pd.Series) -> None:
         con.close()
 
 
-def read_last_n_spot_klines(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+def read_last_n_spot_ohlcv(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
     con = _connect(db_path)
     try:
         con.execute("SET TimeZone='UTC';")
         q = f"""
-            SELECT timestamp, open, high, low, close, volume, num_trades, taker_buy_base_volume
-            FROM {TABLE_SPOT_KLINES}
+            SELECT timestamp, snapshot_time, open, high, low, close, volume, num_trades, taker_buy_base_volume
+            FROM {TABLE_SPOT_OHLCV}
             WHERE timestamp < ?
             ORDER BY timestamp DESC
             LIMIT ?

@@ -58,9 +58,9 @@ from cex_data_feed.binance.db import (
     ensure_table_premium_index,
     append_premium_index_if_absent,
     read_last_n_premium_index,
-    ensure_table_spot_klines,
-    append_spot_kline_if_absent,
-    read_last_n_spot_klines,
+    ensure_table_spot_ohlcv,
+    append_spot_ohlcv_if_absent,
+    read_last_n_spot_ohlcv,
 )
 from cex_data_feed.binance.validation import validate_window as _vw
 
@@ -90,7 +90,7 @@ class RunConfig:
     open_interest_db: Path
     long_short_ratio_db: Path
     premium_index_db: Path
-    spot_klines_db: Path
+    spot_ohlcv_db: Path
     # Settings
     n_recent: int = 48
     db_validate_rows: int = 72
@@ -101,7 +101,7 @@ class RunConfig:
     include_open_interest: bool = False
     include_long_short_ratio: bool = False
     include_premium_index: bool = False
-    include_spot_klines: bool = False
+    include_spot_ohlcv: bool = False
 
     def get_ohlcv_db(self) -> Path:
         return self.ohlcv_db
@@ -115,8 +115,8 @@ class RunConfig:
     def get_premium_index_db(self) -> Path:
         return self.premium_index_db
 
-    def get_spot_klines_db(self) -> Path:
-        return self.spot_klines_db
+    def get_spot_ohlcv_db(self) -> Path:
+        return self.spot_ohlcv_db
 
 
 
@@ -135,7 +135,7 @@ def _filter_closed_by_timestamp(api_df: pd.DataFrame, now_floor: pd.Timestamp) -
 def run_once(cfg: RunConfig) -> int:
     # Ensure parent directories exist for each DB
     for db_path in [cfg.ohlcv_db, cfg.open_interest_db, cfg.long_short_ratio_db, 
-                    cfg.premium_index_db, cfg.spot_klines_db]:
+                    cfg.premium_index_db, cfg.spot_ohlcv_db]:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_table(cfg.get_ohlcv_db())
 
@@ -144,6 +144,10 @@ def run_once(cfg: RunConfig) -> int:
     # Pull recent klines (always runs - main OHLCV)
     kl = fetch_klines(DEFAULT_SYMBOL, DEFAULT_INTERVAL, cfg.n_recent)
     api_df_all = klines_to_dataframe(kl)
+    
+    # Add snapshot_time = close time (open + 1h for 1h candles)
+    api_df_all["snapshot_time"] = api_df_all["timestamp"] + pd.Timedelta(hours=1)
+    
     api_df = _filter_closed(api_df_all, now_floor)
     if api_df.empty:
         print("[ERROR] No closed candles returned from API in the requested window", file=sys.stderr)
@@ -213,9 +217,10 @@ def run_once(cfg: RunConfig) -> int:
                 append_row_if_absent(cfg.get_ohlcv_db(), row)
             appended += 1
 
+        ts_min = to_append['timestamp'].min()
+        ts_max = to_append['timestamp'].max()
         print(
-            f"backfill_ok appended={appended} api_window=[{api_df['timestamp'].min()}..{api_df['timestamp'].max()}] "
-            f"last_closed={last_closed_ts} target_hour={target_hour}"
+            f"[INFO] Perp OHLCV: appended={appended} range=[{ts_min}..{ts_max}]"
         )
 
     # --- Open Interest ---
@@ -230,20 +235,30 @@ def run_once(cfg: RunConfig) -> int:
     if cfg.include_premium_index:
         _backfill_premium_index(cfg, now_floor)
 
-    # --- Spot Klines ---
-    if cfg.include_spot_klines:
-        _backfill_spot_klines(cfg, now_floor)
+    # --- Spot OHLCV ---
+    if cfg.include_spot_ohlcv:
+        _backfill_spot_ohlcv(cfg, now_floor)
 
     return 0
 
 
 def _backfill_long_short_ratio(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
-    """Backfill long/short ratio data."""
+    """Backfill long/short ratio data.
+    
+    Note: API timestamp is the snapshot time. We store:
+      - snapshot_time = API timestamp (actual snapshot)
+      - timestamp = snapshot_time - 1h (aligned with OHLCV candle open time)
+    """
     db_path = cfg.get_long_short_ratio_db()
     ensure_table_long_short_ratio(db_path)
 
     ratios = fetch_long_short_ratio(DEFAULT_SYMBOL, period="1h", limit=cfg.n_recent)
     api_df = long_short_ratio_to_dataframe(ratios)
+    
+    # Transform timestamps: API returns snapshot_time, we align to OHLCV candle
+    api_df["snapshot_time"] = api_df["timestamp"]
+    api_df["timestamp"] = api_df["snapshot_time"] - pd.Timedelta(hours=1)
+    
     api_df = _filter_closed_by_timestamp(api_df, now_floor)
 
     if api_df.empty:
@@ -272,16 +287,28 @@ def _backfill_long_short_ratio(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
             append_long_short_ratio_if_absent(db_path, row)
         appended += 1
 
-    print(f"[INFO] Long/Short Ratio: appended={appended}")
+    ts_min = to_append['timestamp'].min()
+    ts_max = to_append['timestamp'].max()
+    print(f"[INFO] Long/Short Ratio: appended={appended} range=[{ts_min}..{ts_max}]")
 
 
 def _backfill_open_interest(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
-    """Backfill open interest statistics."""
+    """Backfill open interest statistics.
+    
+    Note: API timestamp is the snapshot time. We store:
+      - snapshot_time = API timestamp (actual snapshot)
+      - timestamp = snapshot_time - 1h (aligned with OHLCV candle open time)
+    """
     db_path = cfg.get_open_interest_db()
     ensure_table_open_interest(db_path)
 
     oi_list = fetch_open_interest_hist(DEFAULT_SYMBOL, period="1h", limit=cfg.n_recent)
     api_df = open_interest_hist_to_dataframe(oi_list)
+    
+    # Transform timestamps: API returns snapshot_time, we align to OHLCV candle
+    api_df["snapshot_time"] = api_df["timestamp"]
+    api_df["timestamp"] = api_df["snapshot_time"] - pd.Timedelta(hours=1)
+    
     api_df = _filter_closed_by_timestamp(api_df, now_floor)
 
     if api_df.empty:
@@ -310,16 +337,27 @@ def _backfill_open_interest(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
             append_open_interest_if_absent(db_path, row)
         appended += 1
 
-    print(f"[INFO] Open Interest: appended={appended}")
+    ts_min = to_append['timestamp'].min()
+    ts_max = to_append['timestamp'].max()
+    print(f"[INFO] Open Interest: appended={appended} range=[{ts_min}..{ts_max}]")
 
 
 def _backfill_premium_index(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
-    """Backfill premium index klines."""
+    """Backfill premium index klines.
+    
+    Note: This is OHLCV-like data. We store:
+      - timestamp = API open_time (candle open)
+      - snapshot_time = timestamp + 1h (candle close)
+    """
     db_path = cfg.get_premium_index_db()
     ensure_table_premium_index(db_path)
 
     klines = fetch_premium_index_klines(DEFAULT_SYMBOL, DEFAULT_INTERVAL, cfg.n_recent)
     api_df = klines_to_dataframe(klines)
+    
+    # Add snapshot_time = close time (open + 1h for 1h candles)
+    api_df["snapshot_time"] = api_df["timestamp"] + pd.Timedelta(hours=1)
+    
     api_df = _filter_closed(api_df, now_floor)
 
     if api_df.empty:
@@ -348,24 +386,35 @@ def _backfill_premium_index(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
             append_premium_index_if_absent(db_path, row)
         appended += 1
 
-    print(f"[INFO] Premium Index: appended={appended}")
+    ts_min = to_append['timestamp'].min()
+    ts_max = to_append['timestamp'].max()
+    print(f"[INFO] Premium Index: appended={appended} range=[{ts_min}..{ts_max}]")
 
 
-def _backfill_spot_klines(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
-    """Backfill spot klines."""
-    db_path = cfg.get_spot_klines_db()
-    ensure_table_spot_klines(db_path)
+def _backfill_spot_ohlcv(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
+    """Backfill spot OHLCV klines.
+    
+    Note: This is OHLCV-like data. We store:
+      - timestamp = API open_time (candle open)
+      - snapshot_time = timestamp + 1h (candle close)
+    """
+    db_path = cfg.get_spot_ohlcv_db()
+    ensure_table_spot_ohlcv(db_path)
 
     klines = fetch_spot_klines(DEFAULT_SYMBOL, DEFAULT_INTERVAL, cfg.n_recent)
     api_df = spot_klines_to_dataframe(klines)
+    
+    # Add snapshot_time = close time (open + 1h for 1h candles)
+    api_df["snapshot_time"] = api_df["timestamp"] + pd.Timedelta(hours=1)
+    
     api_df = _filter_closed(api_df, now_floor)
 
     if api_df.empty:
-        print("[INFO] Spot Klines: No closed data returned")
+        print("[INFO] Spot OHLCV: No closed data returned")
         return
 
     last_closed_ts = api_df.iloc[-1]["timestamp"]
-    db_tail = read_last_n_spot_klines(db_path, cfg.db_validate_rows, last_closed_ts + pd.Timedelta(hours=1))
+    db_tail = read_last_n_spot_ohlcv(db_path, cfg.db_validate_rows, last_closed_ts + pd.Timedelta(hours=1))
 
     if not db_tail.empty:
         db_max_ts = db_tail["timestamp"].max()
@@ -374,19 +423,21 @@ def _backfill_spot_klines(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
         to_append = api_df.copy()
 
     if to_append.empty:
-        print("[INFO] Spot Klines: No new rows to append")
+        print("[INFO] Spot OHLCV: No new rows to append")
         return
 
     appended = 0
     for _, row in to_append.iterrows():
         if cfg.dry_run:
             if cfg.debug:
-                print("[DRY-RUN] Would append spot_kline:", row.to_dict())
+                print("[DRY-RUN] Would append spot_ohlcv:", row.to_dict())
         else:
-            append_spot_kline_if_absent(db_path, row)
+            append_spot_ohlcv_if_absent(db_path, row)
         appended += 1
 
-    print(f"[INFO] Spot Klines: appended={appended}")
+    ts_min = to_append['timestamp'].min()
+    ts_max = to_append['timestamp'].max()
+    print(f"[INFO] Spot OHLCV: appended={appended} range=[{ts_min}..{ts_max}]")
 
 
 def parse_args(argv: Optional[list[str]] = None) -> RunConfig:
@@ -419,7 +470,7 @@ Examples:
     p.add_argument("--include-open-interest", action="store_true", help="Fetch Open Interest Statistics")
     p.add_argument("--include-long-short-ratio", action="store_true", help="Fetch Long/Short Ratio")
     p.add_argument("--include-premium-index", action="store_true", help="Fetch Premium Index Klines")
-    p.add_argument("--include-spot-klines", action="store_true", help="Fetch Spot Klines")
+    p.add_argument("--include-spot-ohlcv", action="store_true", help="Fetch Spot OHLCV")
     p.add_argument("--all", action="store_true", help="Fetch all data types")
     args = p.parse_args(argv)
 
@@ -433,7 +484,7 @@ Examples:
         open_interest_db = db_dir / "binance_btcusdt_open_interest.duckdb"
         long_short_ratio_db = db_dir / "binance_btcusdt_long_short_ratio.duckdb"
         premium_index_db = db_dir / "binance_btcusdt_premium_index.duckdb"
-        spot_klines_db = db_dir / "binance_btcusdt_spot_klines.duckdb"
+        spot_ohlcv_db = db_dir / "binance_btcusdt_spot_ohlcv.duckdb"
         n_recent = args.n_recent or 48
         db_validate_rows = args.db_validate_rows or 72
         tolerance = args.tolerance if args.tolerance is not None else 1e-8
@@ -446,7 +497,7 @@ Examples:
         open_interest_db = Path(db_paths.get("open_interest", "/tmp/binance_btcusdt_open_interest.duckdb"))
         long_short_ratio_db = Path(db_paths.get("long_short_ratio", "/tmp/binance_btcusdt_long_short_ratio.duckdb"))
         premium_index_db = Path(db_paths.get("premium_index", "/tmp/binance_btcusdt_premium_index.duckdb"))
-        spot_klines_db = Path(db_paths.get("spot_klines", "/tmp/binance_btcusdt_spot_klines.duckdb"))
+        spot_ohlcv_db = Path(db_paths.get("spot_ohlcv", "/tmp/binance_btcusdt_spot_ohlcv.duckdb"))
         n_recent = args.n_recent or backfill_cfg.get("n_recent", 48)
         db_validate_rows = args.db_validate_rows or backfill_cfg.get("db_validate_rows", 72)
         tolerance = args.tolerance if args.tolerance is not None else backfill_cfg.get("tolerance", 1e-8)
@@ -456,7 +507,7 @@ Examples:
         open_interest_db=open_interest_db,
         long_short_ratio_db=long_short_ratio_db,
         premium_index_db=premium_index_db,
-        spot_klines_db=spot_klines_db,
+        spot_ohlcv_db=spot_ohlcv_db,
         n_recent=n_recent,
         db_validate_rows=db_validate_rows,
         tolerance=tolerance,
@@ -465,7 +516,7 @@ Examples:
         include_open_interest=include_all or args.include_open_interest,
         include_long_short_ratio=include_all or args.include_long_short_ratio,
         include_premium_index=include_all or args.include_premium_index,
-        include_spot_klines=include_all or args.include_spot_klines,
+        include_spot_ohlcv=include_all or args.include_spot_ohlcv,
     )
 
 
