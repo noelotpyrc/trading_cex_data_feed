@@ -112,6 +112,95 @@ def coverage_stats(db_path: Path) -> Optional[tuple[pd.Timestamp, pd.Timestamp, 
 
 
 # -----------------------------------------------------------------------------
+# Full OHLCV Table (with trade fields)
+# -----------------------------------------------------------------------------
+
+TABLE_OHLCV_FULL = "ohlcv_btcusdt_1h_full"
+
+
+def ensure_table_ohlcv_full(db_path: Path) -> None:
+    """Create ohlcv_btcusdt_1h_full table if not exists."""
+    con = _connect(db_path)
+    try:
+        con.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE_OHLCV_FULL} (
+              timestamp TIMESTAMP,
+              snapshot_time TIMESTAMP,
+              open DOUBLE,
+              high DOUBLE,
+              low DOUBLE,
+              close DOUBLE,
+              volume DOUBLE,
+              quote_asset_volume DOUBLE,
+              num_trades INTEGER,
+              taker_buy_base_volume DOUBLE,
+              taker_buy_quote_volume DOUBLE,
+              created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        )
+        con.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{TABLE_OHLCV_FULL}_ts ON {TABLE_OHLCV_FULL}(timestamp);")
+    finally:
+        con.close()
+
+
+def append_ohlcv_full_if_absent(db_path: Path, row: pd.Series) -> None:
+    """Append a single row to ohlcv_btcusdt_1h_full if timestamp does not already exist."""
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        con.execute(
+            f"""
+            INSERT INTO {TABLE_OHLCV_FULL} (
+                timestamp, snapshot_time, open, high, low, close, volume,
+                quote_asset_volume, num_trades, taker_buy_base_volume, taker_buy_quote_volume
+            )
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM {TABLE_OHLCV_FULL} WHERE timestamp = ?
+            );
+            """,
+            [
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+                pd.to_datetime(row["snapshot_time"]).to_pydatetime(),
+                float(row["open"]),
+                float(row["high"]),
+                float(row["low"]),
+                float(row["close"]),
+                float(row["volume"]),
+                float(row["quote_asset_volume"]) if row.get("quote_asset_volume") is not None else None,
+                int(row["num_trades"]) if row.get("num_trades") is not None else 0,
+                float(row["taker_buy_base_volume"]) if row.get("taker_buy_base_volume") is not None else None,
+                float(row["taker_buy_quote_volume"]) if row.get("taker_buy_quote_volume") is not None else None,
+                pd.to_datetime(row["timestamp"]).to_pydatetime(),
+            ],
+        )
+    finally:
+        con.close()
+
+
+def read_last_n_ohlcv_full(db_path: Path, n: int, end_exclusive: pd.Timestamp) -> pd.DataFrame:
+    """Read last n rows from ohlcv_btcusdt_1h_full ending before given timestamp."""
+    con = _connect(db_path)
+    try:
+        con.execute("SET TimeZone='UTC';")
+        q = f"""
+            SELECT timestamp, snapshot_time, open, high, low, close, volume,
+                   quote_asset_volume, num_trades, taker_buy_base_volume, taker_buy_quote_volume
+            FROM {TABLE_OHLCV_FULL}
+            WHERE timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+        """
+        df = con.execute(q, [end_exclusive.to_pydatetime(), n]).fetch_df()
+        df = df.sort_values("timestamp").reset_index(drop=True)
+        return df
+    finally:
+        con.close()
+
+
+# -----------------------------------------------------------------------------
 # Open Interest Table (Historical Statistics)
 # -----------------------------------------------------------------------------
 

@@ -49,6 +49,9 @@ from cex_data_feed.binance.db import (
     ensure_table,
     read_last_n_rows_ending_before,
     append_row_if_absent,
+    ensure_table_ohlcv_full,
+    append_ohlcv_full_if_absent,
+    read_last_n_ohlcv_full,
     ensure_table_open_interest,
     append_open_interest_if_absent,
     read_last_n_open_interest,
@@ -138,6 +141,7 @@ def run_once(cfg: RunConfig) -> int:
                     cfg.premium_index_db, cfg.spot_ohlcv_db]:
         db_path.parent.mkdir(parents=True, exist_ok=True)
     ensure_table(cfg.get_ohlcv_db())
+    ensure_table_ohlcv_full(cfg.get_ohlcv_db())  # Also ensure the full table exists
 
     now_floor, target_hour = compute_target_hour()
 
@@ -223,6 +227,10 @@ def run_once(cfg: RunConfig) -> int:
             f"[INFO] Perp OHLCV: appended={appended} range=[{ts_min}..{ts_max}]"
         )
 
+    # --- OHLCV Full (with trade fields) ---
+    # Always backfill this table using its own DB tail check
+    _backfill_ohlcv_full(cfg, api_df_all, now_floor)
+
     # --- Open Interest ---
     if cfg.include_open_interest:
         _backfill_open_interest(cfg, now_floor)
@@ -240,6 +248,49 @@ def run_once(cfg: RunConfig) -> int:
         _backfill_spot_ohlcv(cfg, now_floor)
 
     return 0
+
+
+def _backfill_ohlcv_full(cfg: RunConfig, api_df_all: pd.DataFrame, now_floor: pd.Timestamp) -> None:
+    """Backfill ohlcv_btcusdt_1h_full table with trade fields.
+    
+    Uses its own DB tail check to determine what rows need to be appended.
+    This ensures the full table catches up independently of the original table.
+    """
+    db_path = cfg.get_ohlcv_db()
+    ensure_table_ohlcv_full(db_path)
+    
+    # Filter to closed candles
+    api_df = _filter_closed(api_df_all, now_floor)
+    
+    if api_df.empty:
+        print("[INFO] OHLCV Full: No closed data returned")
+        return
+    
+    last_closed_ts = api_df.iloc[-1]["timestamp"]
+    db_tail = read_last_n_ohlcv_full(db_path, cfg.db_validate_rows, last_closed_ts + pd.Timedelta(hours=1))
+    
+    if not db_tail.empty:
+        db_max_ts = db_tail["timestamp"].max()
+        to_append = api_df[api_df["timestamp"] > db_max_ts].copy()
+    else:
+        to_append = api_df.copy()
+    
+    if to_append.empty:
+        print("[INFO] OHLCV Full: No new rows to append")
+        return
+    
+    appended = 0
+    for _, row in to_append.iterrows():
+        if cfg.dry_run:
+            if cfg.debug:
+                print("[DRY-RUN] Would append ohlcv_full:", row.to_dict())
+        else:
+            append_ohlcv_full_if_absent(db_path, row)
+        appended += 1
+    
+    ts_min = to_append['timestamp'].min()
+    ts_max = to_append['timestamp'].max()
+    print(f"[INFO] OHLCV Full: appended={appended} range=[{ts_min}..{ts_max}]")
 
 
 def _backfill_long_short_ratio(cfg: RunConfig, now_floor: pd.Timestamp) -> None:
