@@ -1,0 +1,7 @@
+# Isolated environment recommended; matches the saved sklearn model environment.
+numpy==2.4.6
+pandas==3.0.5
+scikit-learn==1.7.2
+scipy==1.17.1
+joblib==1.5.3
+pytest==9.1.1
