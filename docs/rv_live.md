@@ -13,10 +13,11 @@ minutes and settled funding collection advances every fifteen minutes. Incomplet
 windows are retried. WebSocket acquisition is a future latency optimization. The
 historical generator's prescribed release times are not measured live-feed latency.
 
-Offline validation has passed. Endpoint connectivity and prospective availability
-remain unverified; the service has not been activated. Current saved EMA thresholds
-end in July 2026, so that exported bundle cannot generate September 2026 live fires.
-Missing or expired artifacts produce an unavailable decision.
+Offline validation includes identical-input historical replay. Each deployed host
+must separately pass endpoint, prospective availability, restart and receipt-causal
+replay checks. The original research export's monthly thresholds ended in July 2026;
+a deployment needs a currently valid offline artifact bundle. Missing or expired
+artifacts produce an unavailable decision. Monthly/quarterly refresh is not automatic.
 
 ## Components
 
@@ -186,13 +187,15 @@ next boundary. `report_eligible` separately captures quarter-start warmup/quarte
 holding constraints. It does not depend on future prices or dataset-end label maturity.
 Position sizing, entry throttling and execution are outside this package.
 
-A close-price revision to already-consumed Binance history stops further signals with
-`history_revision_requires_rebootstrap`, because continuing the old EMA with revised
-history would mix close-price versions. Activity or other OHLC revisions do not change EMA;
-the next scheduled RV prediction uses their latest as-of versions while earlier
-scores remain immutable. Rebuild a consistent bootstrap and replay under a new
-run ID, retaining the old decisions. Missing raw minutes must be repaired; they are
-never filled with invented candles.
+A close-price revision after the exact EMA seed triggers a fresh EMA recurrence from
+that unchanged seed using only versions received by the current decision cutoff.
+Reconstruction is chunked for bounded memory and requires contiguous history. The
+row records `ema_history_rebuilt`; earlier decisions and the score issued at the
+previous RV boundary remain immutable. Missing reconstruction history withholds
+signals until repaired. Activity/other OHLC revisions do not change EMA; their latest
+as-of versions feed the next scheduled RV prediction. A revision at or before the
+exact seed requires an offline rebootstrap/new run, since its earlier EMA history is
+not available to this consumer. No receipt is backdated or historical fire reissued.
 
 ## Audit commands
 

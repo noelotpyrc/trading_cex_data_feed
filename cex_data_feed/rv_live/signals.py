@@ -47,6 +47,22 @@ def released_inputs(store, t, asof):
     return pd.DataFrame([values], index=index), used
 
 
+def rebuild_ema(store, seed, last_bar, cutoff):
+    """Exact recurrence from the fixed seed, bounded memory, current as-of versions."""
+    ema = seed["ema"]
+    alpha = 2 / 1441
+    start = seed["last_bar_ms"] + MINUTE
+    while start <= last_bar:
+        end = min(last_bar + MINUTE, start + 2048 * MINUTE)
+        rows = store.rows("binance", start, end, cutoff)
+        if [r.t for r in rows] != list(range(start, end, MINUTE)):
+            raise Unavailable("missing_revised_ema_history")
+        for row in rows:
+            ema = alpha * row.values["close"] + (1 - alpha) * ema
+        start = end
+    return ema
+
+
 class Bundle:
     """Load trusted local joblib models only after checksum and temporal validation."""
     def __init__(self, path):
@@ -138,11 +154,18 @@ class Engine:
                     old_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, state["knowledge_cutoff_ms"])
                     new_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, cutoff)
                     if not old_rows or not new_rows or old_rows[0].values["close"] != new_rows[0].values["close"]:
+                        if changed[0] <= seed["last_bar_ms"]:
+                            state["revision_blocked"] = True
+                            raise Unavailable("history_revision_requires_rebootstrap")
                         close_revision = True
-                        break
                 if close_revision:
-                    state["revision_blocked"] = True
-                    raise Unavailable("history_revision_requires_rebootstrap")
+                    state["ema_rebuild_required"] = True
+            if state.get("ema_rebuild_required"):
+                # Persist a pending rebuild if required history is missing. A later
+                # repair can recover, without changing any previously issued row.
+                state["ema"] = rebuild_ema(self.store, seed, state["last_bar_ms"], cutoff)
+                state.pop("ema_rebuild_required")
+                decision["ema_history_rebuilt"] = True
             updates = self.store.rows("binance", state["last_bar_ms"] + MINUTE, t, cutoff)
             expected = list(range(state["last_bar_ms"] + MINUTE, t, MINUTE))
             if [r.t for r in updates] != expected:

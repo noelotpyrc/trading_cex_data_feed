@@ -173,13 +173,55 @@ def test_stale_rv_not_carried(warmed):
     assert result["reasons"]==["missing_current_rv_score"]
 
 
-def test_revised_history_requires_new_bootstrap(warmed):
+def batch_ema_reference(store,bundle,last_bar,cutoff):
+    seed=bundle.data['bootstrap']
+    values=[seed['ema']]+[r.values['close'] for r in store.rows('binance',seed['last_bar_ms']+MINUTE,last_bar+MINUTE,cutoff)]
+    return pd.Series(values).ewm(span=1440,adjust=False).mean().iloc[-1]
+
+
+def test_close_revision_rebuilds_causally_and_keeps_previous_decisions(warmed):
+    store,bundle=warmed
+    engine=signals.Engine(store,bundle)
+    first=engine.evaluate(T,T)
+    store.ingest([bar(T-MINUTE,T+MINUTE,close=100.9)])
+    result=engine.evaluate(T+MINUTE,T+MINUTE)
+    assert result['status']=='ok' and result['ema_history_rebuilt']
+    reference=batch_ema_reference(store,bundle,T,T+MINUTE)
+    assert result['ema']==pytest.approx(reference,rel=1e-13,abs=1e-12)
+    assert result['score_t']==T and result['score']==first['score']
+    assert store.decision('live',T)==first
+    # A later second revision cannot leak into replay of either earlier minute.
+    store.ingest([bar(T-MINUTE,T+2*MINUTE,close=100.8)])
+    replay=signals.Engine(store,bundle,'as-observed')
+    assert compare_decisions([first,result],[replay.evaluate(T,T),replay.evaluate(T+MINUTE,T+MINUTE)])['status']=='PASS'
+    again=engine.evaluate(T+2*MINUTE,T+2*MINUTE)
+    assert again['ema']==pytest.approx(batch_ema_reference(store,bundle,T+MINUTE,T+2*MINUTE),rel=1e-13,abs=1e-12)
+
+
+def test_close_rebuild_gap_fails_closed_then_recovers(warmed):
     store,bundle=warmed
     engine=signals.Engine(store,bundle)
     engine.evaluate(T,T)
+    missing_t=T-9000*MINUTE
+    old=store.rows('binance',missing_t,missing_t+MINUTE,T)[0]
+    store.db.execute("DELETE FROM observations WHERE source='binance' AND t=?",(missing_t,));store.db.commit()
     store.ingest([bar(T-MINUTE,T+MINUTE,close=100.9)])
+    failed=engine.evaluate(T+MINUTE,T+MINUTE)
+    assert failed['reasons']==['missing_revised_ema_history']
+    assert store.checkpoint('live')['ema_rebuild_required']
+    store.ingest([Observation('binance',old.t,old.values,T+2*MINUTE)])
+    recovered=engine.evaluate(T+2*MINUTE,T+2*MINUTE)
+    assert recovered['status']=='ok' and recovered['ema_history_rebuilt']
+    assert recovered['ema']==pytest.approx(batch_ema_reference(store,bundle,T+MINUTE,T+2*MINUTE),rel=1e-13,abs=1e-12)
+
+
+def test_revision_before_exact_seed_still_requires_rebootstrap(warmed):
+    store,bundle=warmed
+    engine=signals.Engine(store,bundle)
+    engine.evaluate(T,T)
+    store.ingest([bar(bundle.data['bootstrap']['last_bar_ms'],T+MINUTE,close=100.9)])
     result=engine.evaluate(T+MINUTE,T+MINUTE)
-    assert result["reasons"]==["history_revision_requires_rebootstrap"]
+    assert result['reasons']==['history_revision_requires_rebootstrap']
 
 
 def test_deadline_expired_artifact_and_future_mutation(warmed):
