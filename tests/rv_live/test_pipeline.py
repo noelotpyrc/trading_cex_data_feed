@@ -276,3 +276,31 @@ def test_restart_watcher_does_not_republish_committed_fire(warmed):
     assert first['status']=='ok'
     assert evaluate_new_minute(signals.Engine(store,bundle),T,T+1000) is None
     assert evaluate_new_minute(signals.Engine(store,bundle),T+MINUTE,T+MINUTE)['status']=='ok'
+
+
+def test_activity_revision_preserves_ema_and_updates_next_rv(warmed):
+    store,bundle=warmed
+    engine=signals.Engine(store,bundle)
+    first=engine.evaluate(T,T)
+    revised_t=T-MINUTE
+    old=store.rows('binance',revised_t,T,T)[0]
+    changed=Observation('binance',revised_t,old.values | {'volume':50.,'quote_asset_volume':5000.,'num_trades':100},T+MINUTE)
+    store.ingest([changed])
+    next_minute=engine.evaluate(T+MINUTE,T+MINUTE)
+    assert next_minute['status']=='ok' and next_minute['score_t']==T
+    # A fresh independent calculation from the same exact seed must match EMA.
+    reference=signals.Engine(store,bundle,'reference').evaluate(T,T+MINUTE,replay=True)
+    alpha=2/1441
+    close=store.rows('binance',T,T+MINUTE,T+MINUTE)[0].values['close']
+    assert next_minute['ema']==alpha*close+(1-alpha)*reference['ema']
+    assert store.decision('live',T)==first
+    current=engine.evaluate(T+15*MINUTE,T+15*MINUTE)
+    assert current['status']=='ok'
+    # Re-evaluate with the original activity under a separate store snapshot.
+    store.ingest([Observation('binance',revised_t,old.values,T+15*MINUTE+1)])
+    original_activity=signals.Engine(store,bundle,'unrevised').evaluate(T+15*MINUTE,T+15*MINUTE+1)
+    cols=bundle.data['columns']
+    assert current['features'][cols.index('A01_Q60')] != original_activity['features'][cols.index('A01_Q60')]
+    # First-seen replay stays causal even though the revision is now in the DB.
+    replay=signals.Engine(store,bundle,'as-observed').evaluate(T,T)
+    assert compare_decisions([first],[replay])['status']=='PASS'

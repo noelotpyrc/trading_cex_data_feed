@@ -127,10 +127,20 @@ class Engine:
             if state.get("revision_blocked"):
                 raise Unavailable("history_revision_requires_rebootstrap")
             if "knowledge_cutoff_ms" in state:
-                revision = self.store.db.execute('''SELECT 1 FROM observations WHERE source='binance'
-                    AND t<=? AND received_ms>? AND received_ms<=? LIMIT 1''',
-                    (state["last_bar_ms"], state["knowledge_cutoff_ms"], cutoff)).fetchone()
-                if revision:
+                changed_times = self.store.db.execute('''SELECT DISTINCT t FROM observations WHERE source='binance'
+                    AND t<=? AND received_ms>? AND received_ms<=?''',
+                    (state["last_bar_ms"], state["knowledge_cutoff_ms"], cutoff)).fetchall()
+                # Only close revisions invalidate recursive EMA state. Activity/OHLC
+                # revisions remain versioned and feed the next fresh RV prediction;
+                # previously issued scores/decisions remain immutable.
+                close_revision = False
+                for changed in changed_times:
+                    old_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, state["knowledge_cutoff_ms"])
+                    new_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, cutoff)
+                    if not old_rows or not new_rows or old_rows[0].values["close"] != new_rows[0].values["close"]:
+                        close_revision = True
+                        break
+                if close_revision:
                     state["revision_blocked"] = True
                     raise Unavailable("history_revision_requires_rebootstrap")
             updates = self.store.rows("binance", state["last_bar_ms"] + MINUTE, t, cutoff)

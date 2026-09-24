@@ -186,9 +186,11 @@ next boundary. `report_eligible` separately captures quarter-start warmup/quarte
 holding constraints. It does not depend on future prices or dataset-end label maturity.
 Position sizing, entry throttling and execution are outside this package.
 
-A revision to already-consumed Binance history stops further signals with
+A close-price revision to already-consumed Binance history stops further signals with
 `history_revision_requires_rebootstrap`, because continuing the old EMA with revised
-history would mix versions. Rebuild a consistent bootstrap and replay under a new
+history would mix close-price versions. Activity or other OHLC revisions do not change EMA;
+the next scheduled RV prediction uses their latest as-of versions while earlier
+scores remain immutable. Rebuild a consistent bootstrap and replay under a new
 run ID, retaining the old decisions. Missing raw minutes must be repaired; they are
 never filled with invented candles.
 
