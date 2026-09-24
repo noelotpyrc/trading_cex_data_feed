@@ -43,6 +43,13 @@ def parser():
     return p
 
 
+def evaluate_new_minute(engine, t, emitted_ms):
+    """A restarted watcher must not publish an already committed fire again."""
+    if engine.store.decision(engine.run, t) is not None:
+        return None
+    return engine.evaluate(t, emitted_ms)
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
     if args.command == "compare":
@@ -101,8 +108,9 @@ def main(argv=None):
             print(canonical({"collection": stats}), file=sys.stderr, flush=True)
             # Permit operator replacement of a validated manifest between decisions.
             engine.bundle = Bundle(args.bundle)
-            result = engine.evaluate(t, now_ms())
-            print(canonical(result), flush=True)
+            result = evaluate_new_minute(engine, t, now_ms())
+            if result is not None:
+                print(canonical(result), flush=True)
             time.sleep(max(0.1, (t + MINUTE + 5000 - now_ms()) / 1000))
     finally:
         store.close()

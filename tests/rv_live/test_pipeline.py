@@ -267,3 +267,12 @@ def test_bundle_identity_and_expiry(tmp_path):
     with pytest.raises(signals.Unavailable):bundle.active('quarters',fake.quarter['end_ms'])
     data['columns']=list(reversed(data['columns']));p.write_text(json.dumps(data))
     with pytest.raises(ValueError,match='order'):signals.Bundle(p)
+
+
+def test_restart_watcher_does_not_republish_committed_fire(warmed):
+    from cex_data_feed.rv_live.__main__ import evaluate_new_minute
+    store,bundle=warmed
+    first=evaluate_new_minute(signals.Engine(store,bundle),T,T)
+    assert first['status']=='ok'
+    assert evaluate_new_minute(signals.Engine(store,bundle),T,T+1000) is None
+    assert evaluate_new_minute(signals.Engine(store,bundle),T+MINUTE,T+MINUTE)['status']=='ok'
