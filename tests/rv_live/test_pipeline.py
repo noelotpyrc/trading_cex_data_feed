@@ -346,3 +346,22 @@ def test_activity_revision_preserves_ema_and_updates_next_rv(warmed):
     # First-seen replay stays causal even though the revision is now in the DB.
     replay=signals.Engine(store,bundle,'as-observed').evaluate(T,T)
     assert compare_decisions([first],[replay])['status']=='PASS'
+
+
+@pytest.mark.parametrize('pause',['deadline','artifact'])
+def test_revision_received_during_unavailable_minute_is_not_skipped(warmed,pause):
+    store,bundle=warmed
+    engine=signals.Engine(store,bundle)
+    first=engine.evaluate(T,T)
+    store.ingest([bar(T-MINUTE,T+MINUTE+10_000,close=100.9)])
+    if pause=='deadline':
+        missed=engine.evaluate(T+MINUTE,T+MINUTE+31_000)
+        assert missed['reasons']==['decision_deadline_missed']
+    else:
+        with patch.object(bundle,'active',side_effect=signals.Unavailable('missing_or_expired:months')):
+            missed=engine.evaluate(T+MINUTE,T+MINUTE+20_000)
+        assert missed['reasons']==['missing_or_expired:months']
+    resumed=engine.evaluate(T+2*MINUTE,T+2*MINUTE)
+    assert resumed['status']=='ok' and resumed['ema_history_rebuilt']
+    assert resumed['ema']==pytest.approx(batch_ema_reference(store,bundle,T+MINUTE,T+2*MINUTE),rel=1e-13,abs=1e-12)
+    assert store.decision('live',T)==first and store.decision('live',T+MINUTE)==missed

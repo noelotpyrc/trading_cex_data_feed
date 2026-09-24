@@ -124,6 +124,9 @@ class Engine:
         seed = self.bundle.data["bootstrap"]
         seed_hash = digest(seed)
         state = self.store.checkpoint(self.run) or {**seed, "seed_hash": seed_hash}
+        # Decision cutoffs advance even when a deadline/artifact check prevents
+        # EMA processing. Keep a separate watermark for observations applied to EMA.
+        state.setdefault("ema_knowledge_cutoff_ms", state.get("knowledge_cutoff_ms"))
         expected_previous = state.get("last_decision_ms", -1)
         if state.get("seed_hash") != seed_hash:
             raise ValueError("Bootstrap changed; use a new run identifier")
@@ -142,16 +145,16 @@ class Engine:
             month = self.bundle.active("months", t)
             if state.get("revision_blocked"):
                 raise Unavailable("history_revision_requires_rebootstrap")
-            if "knowledge_cutoff_ms" in state:
+            if state["ema_knowledge_cutoff_ms"] is not None:
                 changed_times = self.store.db.execute('''SELECT DISTINCT t FROM observations WHERE source='binance'
                     AND t<=? AND received_ms>? AND received_ms<=?''',
-                    (state["last_bar_ms"], state["knowledge_cutoff_ms"], cutoff)).fetchall()
+                    (state["last_bar_ms"], state["ema_knowledge_cutoff_ms"], cutoff)).fetchall()
                 # Only close revisions invalidate recursive EMA state. Activity/OHLC
                 # revisions remain versioned and feed the next fresh RV prediction;
                 # previously issued scores/decisions remain immutable.
                 close_revision = False
                 for changed in changed_times:
-                    old_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, state["knowledge_cutoff_ms"])
+                    old_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, state["ema_knowledge_cutoff_ms"])
                     new_rows = self.store.rows("binance", changed[0], changed[0] + MINUTE, cutoff)
                     if not old_rows or not new_rows or old_rows[0].values["close"] != new_rows[0].values["close"]:
                         if changed[0] <= seed["last_bar_ms"]:
@@ -174,6 +177,7 @@ class Engine:
             for row in updates:
                 state["ema"] = alpha * row.values["close"] + (1 - alpha) * state["ema"]
                 state["last_bar_ms"] = row.t
+            state["ema_knowledge_cutoff_ms"] = cutoff
             window = 10081 if t % (15 * MINUTE) == 0 else 1441
             bars = self.store.rows("binance", t - window * MINUTE, t, cutoff)
             if [r.t for r in bars] != list(range(t - window * MINUTE, t, MINUTE)):
